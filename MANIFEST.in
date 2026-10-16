@@ -1,0 +1,6 @@
+include README.md
+include CHANGELOG.md
+include FORMAT.md
+include requirements.txt
+recursive-include tests *.py *.bin *.png
+include hushraster/py.typed
