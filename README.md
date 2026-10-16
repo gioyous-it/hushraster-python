@@ -8,6 +8,8 @@
 
 **Maintainer:** `gioyous-it`
 
+![HushRaster logo](hushrastlogo.png)
+
 HushRaster hides arbitrary bytes inside a PNG carrier using low-amplitude, block-pattern modulation. It is a hiding format/utility, **not an encryption system**. Payloads are stored raw by default; compression happens only when explicitly requested with `-z` / `--zlib`. Encrypt a payload separately before encoding if confidentiality is needed.
 
 ## Two separate licenses
