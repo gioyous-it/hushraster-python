@@ -263,6 +263,8 @@ python3 tests/test_failsafe.py
 
 The script saves the original, encoded carrier, JPEG/WebP results, cropped examples, amplified difference image, visual comparison sheet, and `test-report.json` in `test-results/`.
 
+## Fun Facts
+1. The logo (hushrastlogo.png) Itself Is encoded. Try decoding It.
 
 ## GitHub repository and contributions
 
