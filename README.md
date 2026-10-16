@@ -6,7 +6,7 @@
 
 **Repository:** <https://github.com/gioyous-it/hushraster-python>
 
-**Maintainer:** `gioyous-it`
+**Maintainer:** [gioyous.it](https://gioyous.it)
 
 ![HushRaster logo](hushrastlogo.png)
 
