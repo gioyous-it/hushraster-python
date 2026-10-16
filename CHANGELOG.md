@@ -27,3 +27,10 @@
 - Added `--on-blank COLOR` to `encode` and `encode-text`, with a generated near-square canvas sized for the payload and both bootstrap anchors.
 - Added grayscale, RGB hex, and named-color parsing.
 - Added package metadata, GitHub Actions CI, source manifest, ignore rules, and regression tests for library imports, blank canvases, redo=128, pixel-equivalent repeated modulation, and missing `os.link`.
+
+
+## Licensing and repository preparation
+
+- Licensed the Python implementation and CLI under GNU GPL v3.0-only (`GPL-3.0-only`).
+- Dedicated the HushRaster format specification (`FORMAT.md`) to the public domain under CC0 1.0 Universal.
+- Added the canonical `gioyous-it/hushraster-python` repository URLs and documented pip installation from GitHub's `main.zip` source archive.

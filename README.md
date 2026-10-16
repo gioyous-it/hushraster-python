@@ -1,6 +1,21 @@
 # HushRaster 1.0
 
+[![Tests](https://github.com/gioyous-it/hushraster-python/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/gioyous-it/hushraster-python/actions/workflows/tests.yml)
+[![License: GPL-3.0-only](https://img.shields.io/badge/Code%20license-GPL--3.0--only-blue.svg)](LICENSE)
+[![Format specification: CC0](https://img.shields.io/badge/Format%20specification-CC0--1.0-lightgrey.svg)](LICENSES/CC0-1.0.txt)
+
+**Repository:** <https://github.com/gioyous-it/hushraster-python>
+
+**Maintainer:** `gioyous-it`
+
 HushRaster hides arbitrary bytes inside a PNG carrier using low-amplitude, block-pattern modulation. It is a hiding format/utility, **not an encryption system**. Payloads are stored raw by default; compression happens only when explicitly requested with `-z` / `--zlib`. Encrypt a payload separately before encoding if confidentiality is needed.
+
+## Two separate licenses
+
+- **Python implementation, CLI, and project code:** GNU General Public License v3.0 only (**GPL-3.0-only**). See [`LICENSE`](LICENSE).
+- **HushRaster format standard/specification:** **CC0 1.0 Universal**. See [`FORMAT.md`](FORMAT.md) and [`LICENSES/CC0-1.0.txt`](LICENSES/CC0-1.0.txt). The standard is dedicated to the public domain to the extent permitted by law.
+
+The CC0 dedication applies to the format specification/standard, **not** to the Python implementation. Conversely, the software's GPL license does not restrict independent implementations of the CC0 standard. Third-party dependencies retain their own licenses.
 
 The application version remains HushRaster 1.0 while the development format is revision 3. The current decoder also reads revision-2 development files from the previous build; other earlier drafts are not guaranteed to be compatible.
 
@@ -27,16 +42,37 @@ The application version remains HushRaster 1.0 while the development format is r
 
 Python 3.10+ is required. The project is packaged with `pyproject.toml`, supports an importable library, and provides a `hushraster` command after installation.
 
-Install from a downloaded source ZIP (the `pyproject.toml` is at the ZIP root):
+### Install the latest version directly from GitHub
+
+The following URL downloads GitHub's automatically generated ZIP snapshot of the **latest commit on the `main` branch**. It is not a `git+...` URL and does not require Git to be installed:
+
+```bash
+python3 -m pip install "https://github.com/gioyous-it/hushraster-python/archive/refs/heads/main.zip"
+hushraster --help
+```
+
+To upgrade to the latest `main` snapshot later:
+
+```bash
+python3 -m pip install --upgrade --force-reinstall "https://github.com/gioyous-it/hushraster-python/archive/refs/heads/main.zip"
+```
+
+This command assumes the repository's default branch is named `main`. If the default branch is renamed, update `main` in the URL. A branch ZIP tracks the latest commit on that branch; it is not a pinned, reproducible release. For a fixed version, install from a tagged release ZIP instead.
+
+### Install a downloaded ZIP or local checkout
+
+If you downloaded a source ZIP to your computer, install it by its local path:
 
 ```bash
 python3 -m pip install ./HushRaster-1.0-GitHub.zip
 hushraster --help
 ```
 
-Or clone/extract the repository and install it in a virtual environment:
+Or clone the repository and install it in a virtual environment:
 
 ```bash
+git clone https://github.com/gioyous-it/hushraster-python.git
+cd hushraster-python
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e ".[test]"
@@ -226,8 +262,14 @@ python3 tests/test_failsafe.py
 The script saves the original, encoded carrier, JPEG/WebP results, cropped examples, amplified difference image, visual comparison sheet, and `test-report.json` in `test-results/`.
 
 
-## GitHub repository notes
+## GitHub repository and contributions
 
-The repository includes `.gitignore`, `MANIFEST.in`, `pyproject.toml`, package entry points, a cross-version GitHub Actions workflow, and tests for the library API, both CLI launch styles, blank canvases, redo pixel equivalence, and the Android no-`os.link` fallback. The generated image samples and local build artifacts are not needed for a source release.
+Canonical repository: <https://github.com/gioyous-it/hushraster-python>
 
-**License is not specified in this source tree yet.** Choose and add the intended license before treating the GitHub repository as an openly reusable project; a public repository without a license does not automatically grant others permission to reuse its code.
+- Latest `main` branch source ZIP: <https://github.com/gioyous-it/hushraster-python/archive/refs/heads/main.zip>
+- Releases and versioned source archives: <https://github.com/gioyous-it/hushraster-python/releases>
+- Issues and bug reports: <https://github.com/gioyous-it/hushraster-python/issues>
+
+The repository includes `.gitignore`, `MANIFEST.in`, `pyproject.toml`, package entry points, a cross-version GitHub Actions workflow, and tests for the library API, both CLI launch styles, blank canvases, redo pixel equivalence, and the Android no-`os.link` fallback. Generated image samples and local build artifacts are excluded from the source release.
+
+Contributions to the implementation are subject to GPL-3.0-only. The HushRaster format specification remains CC0-1.0. Before submitting a contribution, ensure you have the rights to contribute it under the applicable license. See [`LICENSE`](LICENSE) and [`LICENSES/CC0-1.0.txt`](LICENSES/CC0-1.0.txt).

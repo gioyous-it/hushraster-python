@@ -1,5 +1,7 @@
 # HushRaster 1.0 format notes
 
+**License: CC0 1.0 Universal.** This document specifies the HushRaster format standard and is dedicated to the public domain to the extent permitted by law. See [`LICENSES/CC0-1.0.txt`](LICENSES/CC0-1.0.txt). This dedication applies to the standard/specification, not to the Python implementation, which is licensed separately under GNU GPL v3.0-only.
+
 This document describes the format implemented by HushRaster 1.0. It is intentionally incompatible with earlier drafts.
 
 ## Carrier and tile grid

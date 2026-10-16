@@ -1,11 +1,13 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "hushraster"
 version = "1.0"
 description = "A Python library and command-line tool for hiding bytes in images"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["Pillow>=10.0", "numpy>=1.24"]
@@ -21,6 +23,13 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
 ]
+
+[project.urls]
+Homepage = "https://github.com/gioyous-it/hushraster-python"
+Repository = "https://github.com/gioyous-it/hushraster-python"
+Issues = "https://github.com/gioyous-it/hushraster-python/issues"
+Changelog = "https://github.com/gioyous-it/hushraster-python/blob/main/CHANGELOG.md"
+"HushRaster Standard (CC0-1.0)" = "https://github.com/gioyous-it/hushraster-python/blob/main/FORMAT.md"
 
 [project.scripts]
 hushraster = "hushraster.cli:main"
