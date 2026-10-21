@@ -1,4 +1,6 @@
-"""HushRaster 1.0 robust block-modulation codec.
+# SPDX-FileCopyrightText: 2026 HushRaster contributors
+# SPDX-License-Identifier: GPL-3.0-only
+"""HushRaster 1.0.1 high-redundancy barcode codec.
 
 The embedding changes each RGB channel by no more than two integer levels.
 It uses a differential pattern inside 8x8 blocks, repeated voting, and a
@@ -11,9 +13,9 @@ from functools import lru_cache
 from pathlib import Path
 from PIL import Image
 
-VERSION = "1.0"
+VERSION = "1.0.1"
 MAGIC = b"HRS1"
-# App version remains 1.0 during development; format revision 2 introduces
+# App version is independent of the on-wire revision; format revision 2 introduced
 # explicit body-compression metadata and is intentionally incompatible with drafts.
 FORMAT_VERSION = 3
 SUPPORTED_FORMAT_VERSIONS = (3, 2)  # v2 retained only as a legacy decode path
@@ -157,7 +159,7 @@ def stride_for(n):
     return candidate
 
 def _shuffle(values, seed):
-    # HushRaster 1.0 specifies Fisher-Yates driven by xorshift32 so the slot
+    # The legacy revision-2 format specifies Fisher-Yates driven by xorshift32 so the slot
     # permutation is deterministic across Python versions and implementations.
     state=seed & 0xffffffff
     if state == 0: state=0xA341316C
@@ -403,7 +405,7 @@ def _ensure_capacity(image, needed, resize, max_pixels):
     return image.resize((w,h), Image.Resampling.LANCZOS), True
 
 def encode_image(image, payload, filename, resize=False, max_pixels=MAX_PIXELS, compression="none", verify=True):
-    """Embed bytes. Compression is opt-in: only compression="z" uses zlib."""
+    """Legacy IMGMod encoder. New releases never create compressed payloads."""
     import numpy as np
     if image.width <= 0 or image.height <= 0:
         raise HushRasterError("Carrier image has invalid zero-sized dimensions")
@@ -411,13 +413,13 @@ def encode_image(image, payload, filename, resize=False, max_pixels=MAX_PIXELS, 
         raise HushRasterError(
             f"Input cover {image.width}x{image.height} exceeds the {MAX_PIXELS:,}-pixel codec safety limit."
         )
-    if compression not in ("none", "z"):
-        raise HushRasterError("Compression must be 'none' or 'z'; use --zlib to opt in")
+    if compression != "none":
+        raise HushRasterError("Payload compression is no longer supported; pass compression='none'")
     if len(payload) > 0xffffffff: raise HushRasterError("Payload exceeds the 4 GiB format limit")
     if len(payload) > MAX_DECODE_BYTES:
         raise HushRasterError(f"Payload exceeds the {MAX_DECODE_BYTES:,}-byte decoded-size safety limit")
-    stored_payload = zlib.compress(payload, level=1) if compression == "z" else payload
-    compression_id = COMPRESSION_ZLIB if compression == "z" else COMPRESSION_NONE
+    stored_payload = payload
+    compression_id = COMPRESSION_NONE
     if len(stored_payload) > 0xffffffff: raise HushRasterError("Stored payload exceeds the 4 GiB format limit")
     # Round dimensions to block boundaries without changing image content except for edge padding.
     w=max(8,(image.width//8)*8); h=max(8,(image.height//8)*8)

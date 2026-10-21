@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 HushRaster contributors
+# SPDX-License-Identifier: GPL-3.0-only
 """Encoder-only convenience helpers for HushRaster.
 
 These helpers are deliberately outside ``core.py``: the on-image format and
@@ -8,7 +10,6 @@ from __future__ import annotations
 
 import math
 import re
-import zlib
 from typing import Sequence
 
 from PIL import Image, ImageColor
@@ -151,14 +152,14 @@ def create_blank_canvas(
 ) -> Image.Image:
     """Create the minimum-area blank RGB canvas needed for a payload.
 
-    ``compression`` matches :func:`hushraster.encode_image`: ``"none"`` is
-    the default and ``"z"`` explicitly applies zlib level 1 before sizing.
+    New encodings are always uncompressed. The parameter remains only to give
+    callers a clear error when migrating older scripts that requested zlib.
     """
     if not isinstance(payload, (bytes, bytearray, memoryview)):
         raise HushRasterError("payload must be bytes-like")
-    if compression not in ("none", "z"):
-        raise HushRasterError("Compression must be 'none' or 'z'")
-    body_len = len(zlib.compress(bytes(payload), level=1)) if compression == "z" else len(payload)
+    if compression != "none":
+        raise HushRasterError("Payload compression is no longer supported; pass compression='none'")
+    body_len = len(payload)
     size = minimum_canvas_size(body_len, filename, max_pixels=max_pixels)
     return Image.new("RGB", size, parse_color(color))
 

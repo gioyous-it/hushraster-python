@@ -1,0 +1,41 @@
+{
+  "release": "1.0.1",
+  "recommended_standard": "R1 (Resilient Compact)",
+  "payload_bytes": 61,
+  "p2_ppm": 1,
+  "r1_ppm": 1,
+  "p2_image_pixels": [
+    29,
+    29
+  ],
+  "p2_module_area_including_quiet_zone": 841,
+  "p2_parity_symbols": 16,
+  "p2_max_unknown_symbol_errors_per_block": 8,
+  "r1_image_pixels": [
+    29,
+    32
+  ],
+  "r1_module_area_including_quiet_zone": 928,
+  "r1_grid_modules": [
+    27,
+    30
+  ],
+  "r1_finder_modules": 25,
+  "r1_data_module_positions": 785,
+  "r1_parity_symbols": 32,
+  "r1_max_unknown_symbol_errors_per_codeword": 16,
+  "r1_logo_overlay_modules": [
+    7,
+    7
+  ],
+  "r1_logo_covered_modules": 49,
+  "r1_changed_module_bits": 23,
+  "r1_changed_reed_solomon_symbols": 10,
+  "r1_logo_test_exact_recovery": true,
+  "r1_auto_detection_after_logo": true,
+  "r1_area_over_p2_percent": 10.3,
+  "readable_r1_image_pixels_ppm4": [
+    116,
+    128
+  ]
+}

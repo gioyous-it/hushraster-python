@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Focused fail-safe tests for the evolving HushRaster 1.0 development format."""
+# SPDX-FileCopyrightText: 2026 HushRaster contributors
+# SPDX-License-Identifier: GPL-3.0-only
+"""Focused fail-safe tests for the evolving HushRaster 1.0.1 development format."""
 from pathlib import Path
 import argparse
 import errno
@@ -32,7 +34,8 @@ from hushraster.core import (  # noqa: E402
     read_image,
     required_tiles,
 )
-from hushraster.cli import cmd_decode, save_verified_png, write_output  # noqa: E402
+from hushraster.cli import _decode_any, save_verified_png, write_output  # noqa: E402
+from hushraster.encoder import create_blank_canvas  # noqa: E402
 
 
 def flip_wire_bit(data: bytes, bit_index: int) -> bytes:
@@ -162,7 +165,11 @@ def test_blank_image_rejection() -> None:
 
 
 
-def test_combined_header_vote_recovery(encoded: Image.Image, payload: bytes, base: Image.Image) -> None:
+def test_combined_header_vote_recovery(encoded: Image.Image | None = None, payload: bytes | None = None, base: Image.Image | None = None) -> None:
+    if encoded is None or payload is None or base is None:
+        payload = b"combined header vote recovery fixture\x00\xff"
+        base = create_blank_canvas(payload, "combined-vote.bin", "80")
+        encoded, _info = encode_image(base, payload, "combined-vote.bin")
     # Damage different prefix bits in opposite header anchors. The top-left
     # copy alone becomes invalid; the center copy alone also becomes invalid;
     # pooling the 52 votes per bit must recover the correct prefix. Reuse the
@@ -222,29 +229,28 @@ def test_atomic_decoded_output_and_unverified_guard() -> None:
             assert fallback_target.read_bytes() == b"fallback bytes"
         assert not list(root.glob(".*.tmp")) and not list(root.glob(".*.tmp.png")), "temporary output leaked"
 
-        carrier = root / "dummy.png"
-        carrier.write_bytes(b"placeholder for mocked decoder")
-        destination = root / "unverified.bin"
         args = argparse.Namespace(
-            image=str(carrier), output=str(destination), pipe=False,
-            force=False, focus=False, allow_unverified=False,
+            standard="oi1", max_search_width=8192, mode="best",
+            force_zlib=False, force_no_zlib=False, focus=False,
+            allow_unverified=False, max_pixels=40_000_000,
         )
         uncertain = (b"possibly damaged bytes", {"filename": ""}, {
             "integrity_verified": False, "uncertain": True,
             "warning": "simulated integrity failure", "compression_used": "none",
         })
-        with patch("hushraster.cli._decode_args", return_value=uncertain):
+        carrier = Image.new("RGB", (32, 32), (128, 128, 128))
+        with patch("hushraster.cli.decode_image", return_value=uncertain):
             try:
-                cmd_decode(args)
+                _decode_any(args, carrier)
             except HushRasterError as exc:
-                assert "Refusing to write or print" in str(exc)
+                assert "integrity could not be verified" in str(exc)
             else:
-                raise AssertionError("CLI wrote unverified bytes without opt-in")
-        assert not destination.exists()
+                raise AssertionError("CLI accepted unverified OI1 bytes without opt-in")
         args.allow_unverified = True
-        with patch("hushraster.cli._decode_args", return_value=uncertain):
-            assert cmd_decode(args) == 0
-        assert destination.read_bytes() == b"possibly damaged bytes"
+        with patch("hushraster.cli.decode_image", return_value=uncertain):
+            recovered, code, details = _decode_any(args, carrier)
+        assert recovered == b"possibly damaged bytes" and code == "oi1"
+        assert details["stats"]["integrity_verified"] is False
         assert not list(root.glob(".*.tmp")), "temporary output leaked"
 
 def main() -> None:

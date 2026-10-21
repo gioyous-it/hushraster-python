@@ -1,11 +1,13 @@
+# SPDX-FileCopyrightText: 2026 HushRaster contributors
+# SPDX-License-Identifier: GPL-3.0-only
 [build-system]
 requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "hushraster"
-version = "1.0"
-description = "A Python library and command-line tool for hiding bytes in images"
+version = "1.0.1"
+description = "A family of compact, raw and error-correcting raster barcode standards and scanner"
 license = "GPL-3.0-only"
 license-files = ["LICENSE"]
 readme = "README.md"

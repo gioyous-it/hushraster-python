@@ -1,86 +1,57 @@
-# HushRaster 1.0 format notes
+# HushRaster P2 (Panda 2) — Compact Reed–Solomon Barcode Standard
 
-**License: CC0 1.0 Universal.** This document specifies the HushRaster format standard and is dedicated to the public domain to the extent permitted by law. See [`LICENSES/CC0-1.0.txt`](LICENSES/CC0-1.0.txt). This dedication applies to the standard/specification, not to the Python implementation, which is licensed separately under GNU GPL v3.0-only.
+**Specification license: CC0 1.0 Universal.** The Python implementation is separately licensed under GPL-3.0-only.
 
-This document describes the format implemented by HushRaster 1.0. It is intentionally incompatible with earlier drafts.
+P2 is one standard in the HushRaster family. It carries arbitrary payload bytes in a compact, high-contrast raster without a HushRaster-specific header and without compression. It is a custom format, not QR Code or Data Matrix; those scanners will not decode it. The family registry and OI/P1 compatibility details are in `STANDARDS.md`.
 
-## Carrier and tile grid
+## Payload framing (no HushRaster header)
 
-- The encoded carrier is RGB PNG.
-- Pixels are grouped into an 8×8 tile grid. Trailing pixels that do not complete a tile are discarded before encoding.
-- Tile coordinates are zero-based. The global tile slot is `y * grid_width + x`.
-- Bit streams are MSB-first within each byte.
-- The decoder's pattern and slot permutations are deterministic and do not depend on a secret key.
+The logical payload frame is:
 
-## Tile modulation
+`COBS(payload) || 0x00 || CRC32(payload)`
 
-Each tile uses one of four zero-mean patterns. For `x,y` in `[0,7]`:
+- `COBS(payload)` is Consistent Overhead Byte Stuffing, used only to frame arbitrary bytes. It is not compression and contains no zero bytes.
+- `0x00` terminates the COBS frame. A valid COBS frame is non-empty, even when the user payload itself is empty.
+- `CRC32(payload)` is a four-byte unsigned big-endian CRC-32/ISO-HDLC trailer. It detects accidental corruption but is not cryptographic authentication.
+- No magic number, format version, filename, declared payload length, compression flag, or HushRaster metadata header is stored.
+- Data capacity remaining after the frame is filled with `0xA5` bytes before error correction. These padding bytes are ignored after CRC verification.
+- The payload is recovered byte-for-byte. No filename is preserved. New standalone encoding never compresses payload bytes.
 
-1. `+1` if `x < 4`, otherwise `-1`.
-2. `+1` if `y < 4`, otherwise `-1`.
-3. `+1` if `(x < 4) == (y < 4)`, otherwise `-1`.
-4. `+1` if `x + y < 7`, otherwise `-1`.
+## Error correction and interleaving
 
-The pattern index and polarity are derived from the global slot for data tiles and the local slot for bootstrap-header tiles. Start with `v = slot & 0xffffffff`, then apply 32-bit unsigned arithmetic:
+Data is split into systematic Reed–Solomon blocks over GF(256), with primitive polynomial `0x11D` and roots `α^0` through `α^(n−1)`. Each codeword has at most 255 bytes; its parity symbols follow its data symbols. All blocks use the same adaptive parity level, chosen from the COBS-framed payload size:
 
-```text
-v ^= v >> 16
-v = (v * 0x7feb352d) & 0xffffffff
-v ^= v >> 15
-v = (v * 0x846ca68b) & 0xffffffff
-v ^= v >> 16
-polarity = +1 if (v & 1) else -1
-pattern = patterns[(v >> 1) % 4] * polarity
-```
+| Framed data length | Parity symbols per block | Maximum unknown byte-symbol errors corrected per block |
+|---:|---:|---:|
+| 1–32 bytes | 8 | 4 |
+| 33–128 bytes | 16 | 8 |
+| 129–192 bytes | 32 | 16 |
+| 193 bytes or more | 48 | 24 |
 
-For bit `1`, add `2 * pattern[x,y]` to each RGB channel; for bit `0`, subtract it. Values are clipped to `[0,255]`. Thus the intentional per-channel change never exceeds ±2. A decoder computes `sum((pixel - 127.5) * pattern)` across the tile and reads `1` when the score is positive, otherwise `0`.
+A full block therefore carries respectively up to 247, 239, 223, or 207 data bytes. The last block may be shortened. Codeword bytes are interleaved column-by-column across blocks so a local run of damaged raster bytes is spread among multiple RS blocks instead of concentrating entirely in one block. The decoder infers block lengths from the raster dimensions and tries the supported parity levels; it accepts a candidate only when both RS decoding and CRC32 verification succeed.
 
-## Header
+These correction limits apply to erroneous *byte symbols* within each RS block—not to arbitrary cropping, missing finder patterns, perspective distortion, or all possible lossy transformations. The CRC32 check detects most incorrect output that exceeds correction capacity.
 
-The 19-byte bootstrap prefix is packed big-endian using `>4sBBIIHHB`:
+## Raster layout
 
-| Field | Type | Meaning |
-|---|---|---|
-| Magic | 4 bytes | ASCII `HRS1` |
-| Format revision | uint8 | `3` (current development format; app version remains `1.0`) |
-| Compression method ID | uint8 | `0` = raw/uncompressed; `1` = `z` (zlib) |
-| Stored body length | uint32 | Number of bytes after compression but before v3 error correction; v2 stored the on-wire body length |
-| Original raw length | uint32 | Expected number of decoded payload bytes before compression |
-| Grid width | uint16 | Original number of 8×8 tiles horizontally |
-| Grid height | uint16 | Original number of 8×8 tiles vertically |
-| Filename length | uint8 | UTF-8 filename length; at most 120 bytes |
+- PNG, black and white, with a one-module quiet zone.
+- Three compact 4×4 asymmetric finder patterns sit at the top-left, top-right, and bottom-left corners. Their 48 modules total are reserved and excluded from data.
+- Payload bits are sent most-significant-bit first through the remaining modules in row-major order. Any final modules that do not make up a complete byte remain white.
+- The CLI defaults to **4 pixels per module** (`--ppm 4`). Use `--ppm 1` for the smallest raster, or `--ppm 2` through `--ppm 32` for a larger, easier-to-view or print-friendly image without changing encoded data density.
+- Grid width and height are selected to minimize output pixels while maintaining a valid RS block layout. The dimensions determine the number of codeword bytes; no stored length field is required.
+- The decoder expects an aligned, intact PNG raster. It samples module centers and checks the corner patterns, but it is not yet a general camera scanner and does not correct perspective, arbitrary rescaling, or rotation.
+- The default encode/decode safety limit is 40,000,000 image pixels. It is an implementation resource limit, not a barcode-version limit. Larger images need both a higher configured limit and enough memory.
 
-The full header is:
+## Compatibility
 
-`prefix || UTF-8 filename || SHA256(original_raw_payload)[0:16] || CRC32(prefix || filename || digest)`
+The P2 decoder supports the compact Reed–Solomon layout described here. The P1 decoder supports the previous headerless three-copies-per-bit raster. OI is the separate legacy IMGMod image-overlay format with its own metadata header and decoder. See [`STANDARDS.md`](STANDARDS.md) and [`IMGMOD.md`](IMGMOD.md).
 
-The body immediately follows the header remainder in the logical data stream. Method `0` stores the caller-provided bytes unchanged before error correction. Method `1` stores a zlib stream, generated only when the encoder is explicitly given `-z` / `--zlib` (zlib compression level 1). The decoder selects decompression based only on this header field; it does not detect input file types or guess whether compression would be useful. No compression is automatic. `--force-zlib` and `--force-no-zlib` override the declaration for a single decode operation.
+## Content types and scope
 
-Format revision 3 protects the post-compression body with an extended Hamming `(13,8)` SECDED code. Each stored body byte is mapped to 13 bits (eight data bits, four Hamming parity bits, and an overall parity bit), then the bitstream is packed into bytes. The on-wire body length is `ceil(stored_body_length * 13 / 8)`. SECDED corrects any single flipped bit in a 13-bit codeword and detects any double-bit error in that codeword. It cannot correct arbitrary multi-bit damage; the independent SHA-256 payload tag remains the final check. Format revision 2 has no Hamming layer and remains readable for development files created by the previous build.
+The transport stores bytes, not semantic types. Text, URLs, vCards, image files, archives, encrypted payloads, and other files can all be carried as bytes. It does not identify, open, or auto-launch content types. Generic QR or Data Matrix applications will not recognize this custom format.
 
-The CRC32 is a big-endian uint32. The digest is the first 16 bytes of SHA-256; it detects accidental corruption but is not encryption or authentication against an attacker.
+## SL1 wire format
 
-The bootstrap prefix is duplicated in two spatial regions: the top-left region and a centered region. Each prefix bit is represented by 26 repeated tile votes. When the image dimensions are still exact but lossy processing makes each anchor fail separately, revision-3 decoding pools the 52 votes from both exact-size anchors before guessing crop geometry; the full header CRC and payload SHA tag must still pass. The rest of the header is embedded in the data-tile permutation with 47 repetitions per bit; payload bits use 19 repetitions per bit. Majority voting reconstructs each bit. If the header CRC fails, the decoder tries bounded combinations of the least-confident header votes (up to four bit flips among the 24 weakest vote margins) and accepts only a CRC-valid header. In exact decoding, the payload digest is checked before bytes are treated as verified. Best-effort modes may deliberately return unverified reconstruction bytes with a warning.
+SL1 maps each nibble to a bar height from 5 through 20 modules. Bars are equal-width, separated by one module, and vertically centred on a shared horizontal midline in a single row. The canvas is 22 modules tall, including one-module top and bottom quiet margins. Each bar encodes four bits; each encoded byte is two bars.
 
-## Deterministic slot permutation
-
-For format revision 2, the 4096-tile bootstrap region is permuted using Fisher–Yates and xorshift32 with seed `0x48525331`. For each descending index `i`, update the 32-bit state as follows, masking to 32 bits after left shifts/multiplications, then choose `j = state % (i + 1)` and swap positions `i` and `j`:
-
-```text
-state ^= (state << 13) & 0xffffffff
-state ^= state >> 17
-state ^= (state << 5) & 0xffffffff
-state &= 0xffffffff
-```
-
-For format revision 3, the bootstrap copies use spatially stratified placement rather than the legacy random shuffle. There are 152 prefix bits and 26 copies per bit. For bit index `b` and copy index `c`, the physical tile slot is `c * 157 + b`; unused region slots are ignored. This spaces every bit's copies throughout the bootstrap region so a crop is less likely to erase all copies of any one bit. Format revision 2 uses the Fisher–Yates prefix permutation above.
-
-For payload/header-remainder slots, reserve the first 4096 global slots and the 4096-slot region starting at `center_y * grid_width`, where `center_y = (grid_height - ceil(4096 / grid_width)) // 2`. Shuffle the remaining global slot indices in ascending initial order with Fisher–Yates/xorshift32. The seed is:
-
-`((grid_width * 0x9E3779B1) XOR (grid_height * 0x85EBCA77) XOR 0x48525331) & 0xffffffff`.
-
-The logical stream order is the remaining header bytes first, followed by the body bytes. For revision 3, the body bytes are Hamming-coded before placement; revision 2 places the raw or zlib bytes directly. The repetition counts above determine each logical bit's consecutive positions in the shuffled slot list.
-
-## Security and robustness boundaries
-
-HushRaster stores bytes; it does not encrypt them. Encrypt the input file separately if secrecy is required. Revision 3 combines 19-way spatial majority voting, Hamming SECDED error correction, CRC-guided header recovery, and the payload SHA-256 integrity tag. For method `z`, the decoder can additionally try changing low-confidence voted body bits and use zlib’s Adler-32 plus the hidden SHA-256 tag to identify an exact reconstruction. `best`/`depends`/`default` are adaptive; `strict` refuses unverified body results; `fast` limits header-location work; `reconstruct` tries more bit repairs and may return only a best-effort decompressed prefix if the stream is damaged. Unverified reconstructions are warned about unless `--focus` is set. The command-line `decode` and `decode-text` commands refuse to output unverified bytes unless `--allow-unverified` is explicitly supplied; `--focus` does not bypass that guard. The current implementation enforces a 256 MiB decoded-payload safety limit and a 40-million-pixel image limit. Compression/crop recovery is empirical, not universal: some low-quality lossy encodes, resizes, rotations, or off-center crops can exceed the recovery limit.
+The current frame is `0x10 || payload_length_u32_be || payload || crc32_u32_be`. The one-byte identifier makes the fixed opening pattern just two bars instead of eight. Older images with the original four-byte `SL1\0` identifier remain decodable. The frame is divided into chunks of at most 223 data bytes, each encoded as a shortened Reed–Solomon codeword with 32 parity bytes. Codewords are interleaved by symbol position. Decode restores the blocks, corrects symbol errors, checks the marker and length, then validates CRC32. No compression is applied.

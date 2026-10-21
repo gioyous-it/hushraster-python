@@ -1,6 +1,9 @@
+# SPDX-FileCopyrightText: 2026 HushRaster contributors
+# SPDX-License-Identifier: GPL-3.0-only
 from __future__ import annotations
 
 import argparse
+from io import BytesIO
 import errno
 import hashlib
 import os
@@ -12,6 +15,13 @@ from pathlib import Path
 from PIL import Image
 
 from .encoder import MAX_REDO, create_blank_canvas, encode_repeated, parse_color
+from .rawbarcode import (
+    RawBarcodeError, encode_bytes as encode_raw_barcode, decode_file as decode_raw_barcode,
+    _choose_ecc as _choose_barcode_ecc, cobs_encode as _cobs_barcode_frame,
+    encode_p1_bytes, decode_with_standard,
+)
+from .standards import STANDARDS, normalize_standard, standard_listing
+from .newstandards import NewBarcodeError
 
 from .core import (
     VERSION, HushRasterError, read_image, encode_image, decode_image,
@@ -220,8 +230,9 @@ def _encoder_settings(a):
     redo = getattr(a, "redo", 1)
     if isinstance(redo, bool) or redo < 1 or redo > MAX_REDO:
         raise HushRasterError(f"--redo must be between 1 and {MAX_REDO}")
-    compression = "z" if a.zlib_compression else "none"
-    return redo, compression
+    # New CLI output is always uncompressed. The old low-level codec remains
+    # available only for decoding historical IMGMod payloads.
+    return redo, "none"
 
 
 def _print_encoding_summary(out: Path, encoded: Image.Image, info: dict, payload_len: int,
@@ -233,10 +244,7 @@ def _print_encoding_summary(out: Path, encoded: Image.Image, info: dict, payload
         print(f"Input image: {source}")
     if payload_path is not None:
         print(f"Payload: {payload_path} ({payload_len:,} bytes)")
-    if info["compression"] == "z":
-        print(f"Compression: zlib level 1 (explicitly requested)\nStored body: {info['stored_len']:,} bytes ({info['compression_ratio']:.1%} of original)")
-    else:
-        print(f"Compression: none (raw body, {info['stored_len']:,} bytes)")
+    print(f"Compression: none (raw body, {info['stored_len']:,} bytes)")
     print(f"Output: {out}\nResolution: {encoded.width}x{encoded.height}\nGrid: {info['grid_w']}x{info['grid_h']} blocks")
     print(f"Stored body bytes before error correction: {info['stored_len']:,}; wire body: {info['wire_body_len']:,} bytes")
     print(f"Error correction: {info['error_correction']}")
@@ -249,172 +257,335 @@ def _print_encoding_summary(out: Path, encoded: Image.Image, info: dict, payload
     print("Compression/crop survival is empirical; no lossy image pipeline can be guaranteed.")
 
 
-def cmd_encode(a):
-    inputs = [Path(value).expanduser() for value in a.inputs]
-    on_blank = getattr(a, "on_blank", None)
+def _save_raw_barcode(image: Image.Image, path: Path, expected_payload: bytes, force: bool = False):
+    path = Path(path)
+    temporary = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and not force:
+            raise HushRasterError(f"Output already exists: {path} (use --force)")
+        fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp.png", dir=str(path.parent))
+        os.close(fd)
+        temporary = Path(name)
+        image.save(temporary, format="PNG")
+        if decode_raw_barcode(temporary) != expected_payload:
+            raise HushRasterError("Headerless barcode failed byte-exact read-back verification")
+        if force:
+            os.replace(temporary, path)
+        else:
+            _install_no_replace(temporary, path)
+        temporary = None
+    except (RawBarcodeError, OSError) as exc:
+        raise HushRasterError(f"Could not safely save barcode: {exc}") from exc
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _unsupported_standard(standard: str):
+    item = STANDARDS[standard]
+    if item.status in ("planned", "reserved"):
+        raise HushRasterError(
+            f"HushRaster {item.code} ({item.name}) is {item.status}: {item.description}. "
+            "It is registered, but not implemented for encoding/decoding yet."
+        )
+    raise HushRasterError(f"HushRaster {item.code} is not supported for this operation")
+
+
+def _save_newstandard_png(image: Image.Image, path: Path, payload: bytes, standard: str, force: bool, max_pixels: int):
+    """Save a custom-standard PNG only after a byte-exact read-back check."""
+    from .newstandards import decode_new_standard
+
+    path = Path(path)
+    temporary = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and not force:
+            raise HushRasterError(f"Output already exists: {path} (use --force)")
+        fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp.png", dir=str(path.parent))
+        os.close(fd)
+        temporary = Path(name)
+        image.save(temporary, format="PNG")
+        with Image.open(temporary) as stored:
+            stored.load()
+            recovered = decode_new_standard(stored, standard, max_pixels=max_pixels)
+        if recovered != payload:
+            raise HushRasterError(f"Saved {standard.upper()} PNG failed byte-exact read-back verification")
+        if force:
+            os.replace(temporary, path)
+        else:
+            _install_no_replace(temporary, path)
+        temporary = None
+    except HushRasterError:
+        raise
+    except Exception as exc:
+        raise HushRasterError(f"Could not safely save {standard.upper()} barcode: {exc}") from exc
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _encode_oi1(payload: bytes, a) -> Image.Image:
+    """Generate the historical OI1 modulation on a generated grey carrier."""
+    import numpy as np
+
+    ppm = a.ppm
+    scale = max(1, (ppm + 1) // 2)  # Legacy OI1 has 8px carrier tiles, not pixel modules.
+    color = getattr(a, "on_blank", "808080")
+    canvas = create_blank_canvas(payload, "", color=color, compression="none", max_pixels=a.max_pixels)
+    if scale != 1:
+        size = (canvas.width * scale, canvas.height * scale)
+        if size[0] * size[1] > a.max_pixels:
+            raise HushRasterError(
+                f"OI1 at --ppm {ppm} needs {size[0]}x{size[1]} pixels; lower --ppm or raise --max-pixels"
+            )
+        canvas = canvas.resize(size, Image.Resampling.NEAREST)
     redo, compression = _encoder_settings(a)
-    if on_blank is not None:
-        if len(inputs) != 2:
-            raise HushRasterError("With --on-blank COLOR, use: encode PAYLOAD_FILE OUTPUT.png --on-blank COLOR")
-        payload_path, out = inputs
-        src = None
-        if not payload_path.is_file():
-            raise HushRasterError(f"Payload not found: {payload_path}")
-        payload = payload_path.read_bytes()
-        filename = "" if a.no_filename else payload_path.name
-        color = parse_color(on_blank)
-        image = create_blank_canvas(payload, filename, color, compression, max_pixels=a.max_pixels)
-    else:
-        if len(inputs) != 3:
-            raise HushRasterError("Use: encode IMAGE_FILE PAYLOAD_FILE OUTPUT.png (or PAYLOAD_FILE OUTPUT.png --on-blank COLOR)")
-        src, payload_path, out = inputs
-        if not src.is_file():
-            raise HushRasterError(f"Image not found: {src}")
-        if not payload_path.is_file():
-            raise HushRasterError(f"Payload not found: {payload_path}")
-        payload = payload_path.read_bytes()
-        filename = "" if a.no_filename else payload_path.name
-        image = read_image(src)
-        color = None
-    if out.resolve() in {p.resolve() for p in (src, payload_path) if p is not None}:
-        raise HushRasterError("Output must not overwrite the input image or payload")
-    _check_output_format(out)
-    encoded, info = encode_repeated(
-        image, payload, filename, redo=redo, resize=a.resize,
-        max_pixels=a.max_pixels, compression=compression, verify=True,
+    encoded, _info = encode_repeated(
+        canvas, payload, "", redo=redo, max_pixels=a.max_pixels,
+        compression=compression, verify=True,
     )
-    save_verified_png(encoded, out, payload, force=a.force)
-    print(f"HushRaster {VERSION}: encoded")
-    _print_encoding_summary(out, encoded, info, len(payload), compression,
-                            source=src, payload_path=payload_path, blank_color=color)
+    base = np.asarray(canvas.convert("RGB").getpixel((0, 0)), dtype=np.int16)
+    pixels = np.asarray(encoded.convert("RGB"), dtype=np.int16)
+    visible = np.clip(base + (pixels - base) * 32, 0, 255).astype("uint8")
+    return Image.fromarray(visible, "RGB")
+
+
+def _png_bytes_and_verify(image: Image.Image, payload: bytes, standard: str, max_pixels: int) -> bytes:
+    """Serialize PNG to memory and verify the exact bytes before writing stdout."""
+    from .newstandards import decode_new_standard
+
+    stream = BytesIO()
+    image.save(stream, format="PNG")
+    data = stream.getvalue()
+    stream.seek(0)
+    with Image.open(stream) as saved:
+        saved.load()
+        if standard in ("p1", "p2"):
+            recovered, _detected = decode_with_standard(saved, standard=standard, max_pixels=max_pixels)
+        elif standard == "oi1":
+            recovered, _meta, stats = decode_image(saved, mode="strict")
+            if not stats.get("integrity_verified"):
+                raise HushRasterError("OI1 PNG failed strict integrity verification")
+        else:
+            recovered = decode_new_standard(saved, standard, max_pixels=max_pixels)
+        if recovered != payload:
+            raise HushRasterError(f"Generated {standard.upper()} PNG failed byte-exact read-back verification")
+    return data
+
+
+def cmd_encode(a):
+    """Read arbitrary bytes from stdin; write a verified PNG to stdout."""
+    payload = sys.stdin.buffer.read()
+    standard = getattr(a, "standard", None) or "p2"
+    if standard not in STANDARDS:
+        raise HushRasterError(f"Unknown standard {standard!r}; use `standards` to list available standards")
+    if standard in ("e1", "l1"):
+        _unsupported_standard(standard)
+    ppm = a.ppm
+    if isinstance(ppm, bool) or not isinstance(ppm, int) or not 1 <= ppm <= 32:
+        raise HushRasterError("--ppm must be an integer from 1 through 32")
+
+    if standard == "p2":
+        image = encode_raw_barcode(payload, max_pixels=a.max_pixels, module_size=ppm)
+        detail = "interleaved Reed-Solomon correction + CRC32"
+    elif standard == "p1":
+        image = encode_p1_bytes(payload, max_pixels=a.max_pixels, module_size=ppm)
+        detail = "triple-bit repetition + CRC32"
+    elif standard == "oi1":
+        image = _encode_oi1(payload, a)
+        detail = "legacy standalone modulation on generated carrier"
+    elif standard == "sl1":
+        from .slbarcode import encode_sl1
+        image = encode_sl1(payload, ppm=ppm, max_pixels=a.max_pixels)
+        detail = "single row of variable-height vertical bars; CRC32 + Reed-Solomon (32 parity symbols)"
+    elif standard in ("p3", "d1", "ce1", "z1"):
+        from .newstandards import encode_ce1, encode_d1, encode_p3, encode_z1
+        encoders = {"p3": encode_p3, "d1": encode_d1, "ce1": encode_ce1, "z1": encode_z1}
+        image = encoders[standard](payload, ppm=ppm, max_pixels=a.max_pixels)
+        detail = STANDARDS[standard].description
+    else:
+        from .newstandards import encode_variant
+        image = encode_variant(payload, standard, ppm=ppm, max_pixels=a.max_pixels)
+        detail = STANDARDS[standard].description
+
+    png = _png_bytes_and_verify(image, payload, standard, a.max_pixels)
+    sys.stdout.buffer.write(png)
+    sys.stdout.buffer.flush()
+    print(
+        f"HushRaster {VERSION} {standard.upper()} ({STANDARDS[standard].name}): "
+        f"encoded {len(payload):,} stdin bytes; PNG {image.width}x{image.height}; --ppm {ppm}; {detail}",
+        file=sys.stderr,
+    )
     return 0
 
-
-def cmd_encode_text(a):
-    inputs = list(a.inputs)
-    on_blank = getattr(a, "on_blank", None)
+def cmd_imgmod_encode(a):
+    """Legacy origin-image overlay; payload bytes are read from stdin."""
+    inputs = [Path(value).expanduser() for value in a.inputs]
     redo, compression = _encoder_settings(a)
-    if on_blank is not None:
-        if len(inputs) != 2:
-            raise HushRasterError("With --on-blank COLOR, use: encode-text TEXT OUTPUT.png --on-blank COLOR")
-        text_value, out_value = inputs
-        src = None
-        payload_path = None
-        out = Path(out_value).expanduser()
-        payload = text_value.encode("utf-8")
-        color = parse_color(on_blank)
-        image = create_blank_canvas(payload, "", color, compression, max_pixels=a.max_pixels)
-    else:
-        if len(inputs) != 3:
-            raise HushRasterError("Use: encode-text IMAGE TEXT OUTPUT.png (or TEXT OUTPUT.png --on-blank COLOR)")
-        src = Path(inputs[0]).expanduser()
-        text_value, out_value = inputs[1], inputs[2]
-        payload_path = None
-        out = Path(out_value).expanduser()
-        if not src.is_file():
-            raise HushRasterError(f"Image not found: {src}")
-        payload = text_value.encode("utf-8")
-        image = read_image(src)
-        color = None
-    if src is not None and out.resolve() == src.resolve():
-        raise HushRasterError("Output must not overwrite input image")
+    if len(inputs) != 2:
+        raise HushRasterError("Use: imgmod encode IMAGE_FILE OUTPUT.png; payload bytes are read from stdin")
+    source, out = inputs
+    if not source.is_file():
+        raise HushRasterError(f"Image not found: {source}")
+    payload = sys.stdin.buffer.read()
+    image = read_image(source)
+    if out.resolve() == source.resolve():
+        raise HushRasterError("Output must not overwrite the input image")
     _check_output_format(out)
     encoded, info = encode_repeated(
         image, payload, "", redo=redo, resize=a.resize,
         max_pixels=a.max_pixels, compression=compression, verify=True,
     )
     save_verified_png(encoded, out, payload, force=a.force)
-    print(f"Encoded {len(payload):,} UTF-8 bytes using {'zlib' if compression == 'z' else 'raw storage'} to {out} ({encoded.width}x{encoded.height})")
-    print(f"Body error correction: {info['error_correction']} ({info['stored_len']:,} pre-ECC bytes → {info['wire_body_len']:,} wire bytes)")
-    print(f"Encoder passes (--redo): {info.get('redo_passes', 1)}")
-    if color is not None:
-        print(f"Blank canvas color: RGB {color}")
-    print("Verification: final strict in-memory decode and saved-PNG read-back both passed.")
-    if compression == "z":
-        print(f"Stored compressed body before error correction: {info['stored_len']:,} bytes")
+    print(
+        f"HushRaster {VERSION}: legacy IMGMod overlay encoded {len(payload):,} stdin bytes; "
+        f"{encoded.width}x{encoded.height}; ECC {info['error_correction']}",
+        file=sys.stderr,
+    )
     return 0
 
-def cmd_decode(a, text=False):
-    src = Path(a.image).expanduser()
-    if not src.is_file():
-        raise HushRasterError(f"Image not found: {src}")
+
+def _legacy_decode(a):
     payload, meta, stats = _decode_args(a)
-    _warn_if_needed(stats, a.focus)
+    _warn_if_needed(stats, getattr(a, "focus", False))
     if not stats.get("integrity_verified") and not getattr(a, "allow_unverified", False):
         raise HushRasterError(
-            "Refusing to write or print recovered bytes because their integrity was not verified. "
-            "Keep the carrier and retry with --mode strict for verified-only decoding, or add "
-            "--allow-unverified only if you knowingly accept potentially incorrect/incomplete bytes."
+            "OI1 integrity could not be verified. Refusing to output bytes; use --allow-unverified "
+            "only when knowingly accepting potentially incorrect or incomplete data."
         )
-    if text:
+    return payload, "oi1", {"meta": meta, "stats": stats}
+
+
+def _decode_any(a, image=None):
+    """Decode a PNG image supplied by the caller; normal commands never open paths."""
+    if image is None:
+        raw_png = sys.stdin.buffer.read()
+        if not raw_png:
+            raise HushRasterError("No PNG bytes received on stdin")
         try:
-            textval = payload.decode("utf-8")
-        except UnicodeDecodeError as e:
-            raise HushRasterError("Recovered payload is not valid UTF-8; use decode to recover raw bytes") from e
-        if a.output:
-            out = Path(a.output).expanduser()
-            if out.resolve() == src.resolve():
-                raise HushRasterError("Output must not overwrite input image")
-            write_output(out, payload, a.force)
-            print(f"Text saved to: {out}")
-        else:
-            sys.stdout.write(textval)
-            if not textval.endswith("\n"):
-                sys.stdout.write("\n")
-    else:
-        if a.pipe:
-            sys.stdout.buffer.write(payload)
-            sys.stdout.buffer.flush()
-            return 0
-        if a.output:
-            out = Path(a.output).expanduser()
-        else:
-            out = Path(Path(meta["filename"]).name if meta["filename"] else "recovered.bin").expanduser()
-        if out.resolve() == src.resolve():
-            raise HushRasterError("Output must not overwrite input image")
-        write_output(out, payload, a.force)
-        if stats.get("integrity_verified"):
-            details = []
-            if stats.get("ecc_corrected_symbols"):
-                details.append(f"SECDED corrected {stats['ecc_corrected_symbols']} codeword bit error(s)")
-            if stats.get("repair_bits"):
-                details.append(f"repaired {stats['repair_bits']} low-confidence bit vote(s)")
-            suffix = f" ({'; '.join(details)})" if details else ""
-            print(f"Recovered and verified {len(payload):,} bytes: {out}{suffix}")
-        elif a.focus and stats.get("warning"):
-            print(f"Output written ({len(payload):,} bytes): {out}")
-        elif stats.get("uncertain"):
-            print(f"Best-effort output written ({len(payload):,} bytes; NOT verified): {out}")
-        else:
-            print(f"Output written ({len(payload):,} bytes; integrity unverified): {out}")
+            image = read_image(BytesIO(raw_png))
+        except Exception as exc:
+            raise HushRasterError(f"Could not read PNG from stdin: {exc}") from exc
+    standard = getattr(a, "standard", None)
+    if standard in ("e1", "l1"):
+        _unsupported_standard(standard)
+    if standard == "oi1":
+        payload, meta, stats = decode_image(image, max_search_width=a.max_search_width,
+                                            mode=a.mode,
+                                            force_compression=("z" if getattr(a, "force_zlib", False) else
+                                                               "none" if getattr(a, "force_no_zlib", False) else None))
+        _warn_if_needed(stats, getattr(a, "focus", False))
+        if not stats.get("integrity_verified") and not getattr(a, "allow_unverified", False):
+            raise HushRasterError("OI1 integrity could not be verified; use --allow-unverified only if you accept possibly incorrect data")
+        return payload, "oi1", {"meta": meta, "stats": stats}
+    if standard in ("p1", "p2"):
+        try:
+            payload, detected = decode_with_standard(image, standard=standard, max_pixels=a.max_pixels)
+            return payload, detected, None
+        except (RawBarcodeError, ValueError) as exc:
+            raise HushRasterError(str(exc)) from exc
+    if standard is not None:
+        from .newstandards import decode_new_standard
+        try:
+            return decode_new_standard(image, standard, max_pixels=a.max_pixels), standard, None
+        except (NewBarcodeError, ValueError) as exc:
+            raise HushRasterError(str(exc)) from exc
+    failures = []
+    try:
+        payload, detected = decode_with_standard(image, max_pixels=a.max_pixels)
+        return payload, detected, None
+    except (RawBarcodeError, ValueError) as exc:
+        failures.append(f"P2/P1: {exc}")
+    try:
+        from .newstandards import decode_auto_new
+        payload, detected = decode_auto_new(image, max_pixels=a.max_pixels)
+        return payload, detected, None
+    except Exception as exc:
+        failures.append(f"P3/OI2/CE1/Z1: {exc}")
+    try:
+        payload, meta, stats = decode_image(image, max_search_width=a.max_search_width, mode=a.mode)
+        _warn_if_needed(stats, getattr(a, "focus", False))
+        if not stats.get("integrity_verified") and not getattr(a, "allow_unverified", False):
+            raise HushRasterError("OI1 integrity could not be verified; use --allow-unverified only if you accept possibly incorrect data")
+        return payload, "oi1", {"meta": meta, "stats": stats}
+    except Exception as exc:
+        failures.append(f"OI1: {exc}")
+    raise HushRasterError("Could not identify a HushRaster barcode: " + " | ".join(failures))
+
+
+def cmd_decode(a):
+    """Read a PNG from stdin and write the exact recovered bytes to stdout."""
+    payload, _standard, _details = _decode_any(a)
+    sys.stdout.buffer.write(payload)
+    sys.stdout.buffer.flush()
     return 0
+
+def _standard_description(code: str, payload: bytes, details=None) -> str:
+    count = len(payload)
+    if code == "p2":
+        return f"HushRaster P2 (Panda 2): verified\nDecoded bytes: {count:,}\nError correction: interleaved Reed-Solomon + CRC32"
+    if code == "p1":
+        return f"HushRaster P1 (Panda 1): verified\nDecoded bytes: {count:,}\nError correction: triple-bit repetition + CRC32"
+    if code == "p3":
+        return f"HushRaster P3: decoded {count:,} bytes\nFraming: 32-bit payload length + literal payload\nChecksum: none\nError correction: none; damaged data is not detected"
+    if code == "d1":
+        return f"HushRaster D1 (Diagonal 1): decoded {count:,} bytes\nLayout: diagonal data modules on a white barcode canvas\nChecksum: none\nError correction: none"
+    if code == "ce1":
+        return f"HushRaster CE1 (Colored Elephant 1): verified {count:,} bytes\nEncoding: five-colour base-5 module symbols (black, white, red, green, blue)\nChecksum: CRC32\nError correction: none"
+    if code == "z1":
+        return f"HushRaster Z1 (Zebra 1): verified {count:,} bytes\nLayout: striped monochrome barcode\nChecksum: CRC32\nError correction: none"
+    if code == "sl1":
+        return (f"HushRaster SL1 (Scan Lonely 1): verified {count:,} bytes\n"
+                "Layout: one row of equal-width vertical bars; height encodes each four-bit symbol\n"
+                "Integrity: CRC32\nError correction: Reed-Solomon with 32 parity symbols per codeword; up to 16 byte-symbol errors per codeword")
+    if details is None:
+        item = STANDARDS.get(code)
+        label = item.name if item else code.upper()
+        return f"HushRaster {code.upper()} ({label}): verified {count:,} bytes\nFormat: {item.description if item else 'standalone barcode'}"
+    meta, stats = details["meta"], details["stats"]
+    state = "verified" if stats.get("integrity_verified") else ("uncertain reconstruction" if stats.get("uncertain") else "integrity unverified")
+    return (
+        f"HushRaster OI1 (OverImage 1): {state}\nDecoded bytes: {count:,}\n"
+        f"Original uncompressed length: {meta['raw_len']:,}\nStored body before ECC: {meta['stored_len']:,} bytes\n"
+        f"Wire body length: {stats.get('wire_body_len', meta['stored_len']):,} bytes\n"
+        f"Error correction: {stats.get('error_correction', 'none')}\nCompression: {meta['compression']}\n"
+        f"Original filename: {meta['filename'] or '(not stored)'}\nOriginal grid: {meta['grid_w']}x{meta['grid_h']} blocks"
+    )
 
 
 def cmd_inspect(a):
-    src = Path(a.image).expanduser()
-    if not src.is_file():
-        raise HushRasterError(f"Image not found: {src}")
-    payload, meta, stats = _decode_args(a)
-    _warn_if_needed(stats, a.focus)
-    state = "verified" if stats.get("integrity_verified") else (
-        "decoded" if a.focus and stats.get("warning") else
-        ("uncertain reconstruction" if stats.get("uncertain") else "integrity unverified")
-    )
-    print(f"HushRaster payload: {state}\nDecoded bytes: {len(payload):,}\nOriginal uncompressed length from header: {meta['raw_len']:,}")
-    print(f"Stored body before ECC: {meta['stored_len']:,} bytes\nWire body length: {stats.get('wire_body_len', meta['stored_len']):,} bytes")
-    print(f"Error correction: {stats.get('error_correction', 'none')}\nCompression method in header: {meta['compression']}\nCompression method used: {stats['compression_used']}")
-    if stats.get("ecc_corrected_symbols"):
-        print(f"ECC repair: corrected {stats['ecc_corrected_symbols']} Hamming SECDED codeword bit error(s)")
-    print(f"Original filename: {meta['filename'] or '(not stored)'}\nOriginal grid: {meta['grid_w']}x{meta['grid_h']} blocks")
-    if stats.get("repair_bits"):
-        print(f"Repair: verified by integrity tag after changing {stats['repair_bits']} low-confidence bit vote(s)")
+    raw_png = sys.stdin.buffer.read()
+    if not raw_png:
+        raise HushRasterError("No PNG bytes received on stdin")
+    try:
+        with Image.open(BytesIO(raw_png)) as opened:
+            opened.load()
+            image = opened.copy()
+    except Exception as exc:
+        raise HushRasterError(f"Could not read PNG from stdin: {exc}") from exc
+    payload, standard, details = _decode_any(a, image)
+    dimensions = f"{image.width}x{image.height}"
+    print(_standard_description(standard, payload, details))
+    print(f"Image dimensions: {dimensions}\nPixels per module: --ppm (default 4 when encoding)")
     if a.show_full_raw_data:
-        print(f"Header raw hex: {meta['raw'].hex()}")
+        print(f"Payload raw hex: {payload.hex()}")
+    return 0
+
+
+def cmd_standards(_a):
+    print(standard_listing())
     return 0
 
 
 def cmd_capacity(a):
-    im = read_image(Path(a.image).expanduser())
+    raw_png = sys.stdin.buffer.read()
+    if not raw_png:
+        raise HushRasterError("No PNG bytes received on stdin")
+    try:
+        im = read_image(BytesIO(raw_png))
+    except Exception as exc:
+        raise HushRasterError(f"Could not read PNG from stdin: {exc}") from exc
     tiles = (im.width // 8) * (im.height // 8)
     lo, hi = 0, max(0, tiles // (8 * REPEAT))
     while lo < hi:
@@ -424,7 +595,7 @@ def cmd_capacity(a):
         else:
             hi = mid - 1
     print(f"Resolution: {im.width}x{im.height}\n8x8 blocks: {tiles:,}\nApproximate maximum raw payload without filename metadata (uncompressed): {lo:,} bytes")
-    print("With --zlib, capacity depends on the compressed size of the specific payload.")
+    print("This estimates legacy OI1/IMGMod capacity, not the capacity of P1/P2/P3/OI2/CE1/Z1.")
     return 0
 
 
@@ -439,78 +610,103 @@ def cmd_compare(a):
     return 0
 
 
-def _add_encoding_options(parser, text=False):
-    parser.add_argument("--resize", action="store_true", help="explicitly upscale a too-small existing cover (blank canvases size themselves automatically)")
-    parser.add_argument("--max-pixels", type=int, default=MAX_PIXELS)
-    parser.add_argument("--zlib", "-z", dest="zlib_compression", action="store_true",
-                        help="explicitly compress payload with fast zlib level 1 before embedding (default: raw/uncompressed)")
-    parser.add_argument("--redo", type=int, default=1, help=f"apply the encoder repeatedly to its own output (default: 1; max: {MAX_REDO})")
-    parser.add_argument("--on-blank", metavar="COLOR", default=None,
-                        help="create a minimum-size solid-color canvas instead of reading a cover (e.g. cyan, FF, 0, 80, #12ABEF)")
-    parser.add_argument("--force", "-f", action="store_true", help="overwrite output if it exists")
-    if not text:
-        parser.add_argument("--no-filename", action="store_true", help="do not store source filename in hidden header")
+def _add_barcode_encoding_options(parser):
+    parser.add_argument("--ppm", type=int, choices=range(1, 33), default=4,
+                        help="pixels per barcode module (default: 4; use 1 for the smallest raster)")
+    parser.add_argument("--max-pixels", type=int, default=MAX_PIXELS,
+                        help="maximum generated/scanned raster pixels (default: 40,000,000)")
 
 
 def _add_decode_options(parser):
+    parser.add_argument("--max-pixels", type=int, default=MAX_PIXELS,
+                        help="maximum raster pixels accepted by the scanner")
     parser.add_argument("--max-search-width", type=int, default=8192)
     parser.add_argument("--mode", choices=MODES, default="best",
-                        help="best/depends/default: adaptive; strict: verified output only; fast: top-left-only; reconstruct: deeper repair + partial recovery")
+                        help="legacy OI1 scanner mode: best/depends/default/strict/fast/reconstruct")
     force = parser.add_mutually_exclusive_group()
-    force.add_argument("--force-zlib", dest="force_zlib", action="store_true", help="force zlib decompression regardless of the header")
-    force.add_argument("--force-no-zlib", dest="force_no_zlib", action="store_true", help="treat the stored body as raw regardless of the header")
-    parser.add_argument("--focus", action="store_true", help="suppress recovery/uncertainty warnings")
+    force.add_argument("--force-zlib", dest="force_zlib", action="store_true", help=argparse.SUPPRESS)
+    force.add_argument("--force-no-zlib", dest="force_no_zlib", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--focus", action="store_true", help="suppress legacy reconstruction warnings")
 
 
 def build_parser():
-    p = argparse.ArgumentParser(prog="hushraster", description="Hide arbitrary bytes in images with explicit, opt-in zlib compression (HushRaster 1.0).")
-    p.add_argument("--version", action="version", version=f"HushRaster {VERSION}")
-    s = p.add_subparsers(dest="cmd", required=True)
+    parser = argparse.ArgumentParser(
+        prog="hushraster",
+        description="HushRaster barcode standards. Normal encode/decode/inspect/capacity commands use stdin/stdout only; imgmod is the legacy file-based exception.",
+    )
+    parser.add_argument("--version", action="version", version=f"HushRaster {VERSION}")
+    sub = parser.add_subparsers(dest="cmd", required=True)
 
-    e = s.add_parser("encode", help="encode a file into an image")
-    e.add_argument("inputs", nargs="+", metavar="PATH", help="IMAGE PAYLOAD OUTPUT; or PAYLOAD OUTPUT with --on-blank COLOR")
-    _add_encoding_options(e)
-    e.set_defaults(func=cmd_encode)
+    enc = sub.add_parser("encode", help="encode raw stdin bytes into a PNG written to stdout (defaults to P2)")
+    enc.add_argument("--standard", choices=tuple(STANDARDS), help=argparse.SUPPRESS)
+    _add_barcode_encoding_options(enc)
+    enc.add_argument("--on-blank", default="808080", help="OI1 only: generated carrier colour (default: grey)")
+    enc.add_argument("--redo", type=int, default=1, help=argparse.SUPPRESS)
+    enc.add_argument("--resize", action="store_true", help=argparse.SUPPRESS)
+    enc.add_argument("--no-filename", action="store_true", help=argparse.SUPPRESS)
+    enc.set_defaults(func=cmd_encode)
 
-    et = s.add_parser("encode-text", help="encode a text string into an image")
-    et.add_argument("inputs", nargs="+", metavar="VALUE", help="IMAGE TEXT OUTPUT; or TEXT OUTPUT with --on-blank COLOR")
-    _add_encoding_options(et, text=True)
-    et.set_defaults(func=cmd_encode_text)
+    dec = sub.add_parser("decode", help="read a PNG from stdin and write exact recovered bytes to stdout")
+    dec.add_argument("--standard", choices=tuple(STANDARDS), help=argparse.SUPPRESS)
+    dec.add_argument("--allow-unverified", action="store_true", help="permit legacy OI1 recovery without a verified integrity status")
+    _add_decode_options(dec)
+    dec.set_defaults(func=cmd_decode)
 
-    d = s.add_parser("decode", help="decode raw bytes from an image")
-    d.add_argument("image"); d.add_argument("output", nargs="?")
-    d.add_argument("--pipe", action="store_true", help="write raw bytes to stdout instead of a file")
-    d.add_argument("--force", "-f", action="store_true", help="overwrite output if it exists")
-    d.add_argument("--allow-unverified", action="store_true", help="permit output when the payload integrity check failed or was bypassed")
-    _add_decode_options(d)
-    d.set_defaults(func=cmd_decode)
+    ins = sub.add_parser("inspect", help="read a PNG from stdin and report standard/integrity details")
+    ins.add_argument("--standard", choices=tuple(STANDARDS), help=argparse.SUPPRESS)
+    ins.add_argument("--show-full-raw-data", action="store_true")
+    ins.add_argument("--allow-unverified", action="store_true")
+    _add_decode_options(ins)
+    ins.set_defaults(func=cmd_inspect)
 
-    dt = s.add_parser("decode-text", help="decode UTF-8 text from an image")
-    dt.add_argument("image"); dt.add_argument("output", nargs="?")
-    dt.add_argument("--force", "-f", action="store_true", help="overwrite output if it exists")
-    dt.add_argument("--allow-unverified", action="store_true", help="permit output when the payload integrity check failed or was bypassed")
-    _add_decode_options(dt)
-    dt.set_defaults(func=lambda a: cmd_decode(a, True))
+    sub.add_parser("standards", help="list all registered HushRaster standards").set_defaults(func=cmd_standards)
 
-    i = s.add_parser("inspect", help="read payload metadata and verify/decode the payload")
-    i.add_argument("image"); i.add_argument("--show-full-raw-data", action="store_true")
-    _add_decode_options(i)
-    i.set_defaults(func=cmd_inspect)
+    cap = sub.add_parser("capacity", help="estimate legacy OI1/IMGMod capacity from a PNG on stdin")
+    cap.set_defaults(func=cmd_capacity)
 
-    c = s.add_parser("capacity", help="estimate uncompressed capacity")
-    c.add_argument("image"); c.set_defaults(func=cmd_capacity)
+    imgmod = sub.add_parser("imgmod", help="legacy OI1 modulation over an existing origin image")
+    ims = imgmod.add_subparsers(dest="imgmod_cmd", required=True)
+    ie = ims.add_parser("encode", help="modulate stdin bytes into an existing image (legacy OI1)")
+    ie.add_argument("inputs", nargs="+", metavar="PATH", help="IMAGE_FILE OUTPUT.png; bytes come from stdin")
+    ie.add_argument("--resize", action="store_true", help="upscale an undersized origin image when needed")
+    ie.add_argument("--max-pixels", type=int, default=MAX_PIXELS)
+    ie.add_argument("--redo", type=int, default=1)
+    ie.add_argument("--force", "-f", action="store_true")
+    ie.set_defaults(func=cmd_imgmod_encode)
 
-    q = s.add_parser("compare", help="compare source and encoded RGB images")
-    q.add_argument("original"); q.add_argument("encoded"); q.set_defaults(func=cmd_compare)
-    return p
+    comp = ims.add_parser("compare", help="compare an original image with its IMGMod output")
+    comp.add_argument("original")
+    comp.add_argument("encoded")
+    comp.set_defaults(func=cmd_compare)
+    return parser
+
+
+def _normalize_cli_standard(argv):
+    values = list(sys.argv[1:] if argv is None else argv)
+    actions = {"encode", "decode", "inspect"}
+    if values and values[0] in actions and len(values) > 1 and values[1].lower().endswith("+"):
+        requested = values[1].lower()[:-1]
+        if requested == "oi":
+            requested = "oi1"
+        if requested == "oi2":
+            requested = "d1"
+        if requested not in STANDARDS:
+            raise HushRasterError(
+                f"Unknown HushRaster standard selector {values[1]!r}; use `hushraster standards` to list standards"
+            )
+        values = [values[0], "--standard", requested, *values[2:]]
+    return values
 
 
 def main(argv=None):
-    args = build_parser().parse_args(argv)
     try:
+        values = _normalize_cli_standard(argv)
+        args = build_parser().parse_args(values)
+        if hasattr(args, "standard") and args.standard is not None:
+            args.standard = normalize_standard(args.standard)
         return args.func(args)
-    except HushRasterError as e:
-        print(f"hushraster: error: {e}", file=sys.stderr)
+    except (HushRasterError, RawBarcodeError, ValueError) as exc:
+        print(f"hushraster: error: {exc}", file=sys.stderr)
         return 2
 
 

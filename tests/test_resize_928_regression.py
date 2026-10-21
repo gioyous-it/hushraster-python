@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Regression test for the reported 41-byte encode-text --resize dimensions.
+# SPDX-FileCopyrightText: 2026 HushRaster contributors
+# SPDX-License-Identifier: GPL-3.0-only
+"""Regression test for low-level image-modulation resize and error recovery.
 
 This uses a deterministic synthetic cover because the user's original photo is
 not included in the recovered project archive. It is not a substitute for testing

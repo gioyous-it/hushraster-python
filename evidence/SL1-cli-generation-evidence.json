@@ -1,0 +1,52 @@
+{
+  "software": "HushRaster",
+  "version": "1.0.1",
+  "standard": "SL1",
+  "created_by": "HushRaster command-line encoder",
+  "definition": "Single row of equal-width vertical bars with one common baseline; bar height encodes a nibble.",
+  "error_correction_test": "tests/test_sl1.py alters 16 distinct byte symbols in one shortened Reed-Solomon codeword and confirms byte-exact recovery.",
+  "samples": [
+    {
+      "file": "SL1-example-short.png",
+      "payload_bytes": 14,
+      "payload_sha256": "25a4802564278eadc716aac7568c78e6eb46252243bec70ae7fc360d6b6b519e",
+      "png_sha256": "243c9250774c25497641e2ba5cbb43c1bc59238bc4267e1c90de745974b54c90",
+      "width": 1398,
+      "height": 132,
+      "pixels": 184536,
+      "ppm": 6,
+      "explicit_decode": "passed",
+      "automatic_decode": "passed",
+      "visual_palette": "black bars on white only",
+      "generator_command": "python3 -m hushraster encode sl1+ --ppm 6 < payload.bin > image.png"
+    },
+    {
+      "file": "SL1-example-url.png",
+      "payload_bytes": 33,
+      "payload_sha256": "f1844282686f2465a952f63749cd9cd9b8a81c60841ee14cc74d73e8b0c223db",
+      "png_sha256": "58da86074b4cd88e0c630e69c7e513ee4f15e4ba15949e7f875626f8e7e5b1ae",
+      "width": 1854,
+      "height": 132,
+      "pixels": 244728,
+      "ppm": 6,
+      "explicit_decode": "passed",
+      "automatic_decode": "passed",
+      "visual_palette": "black bars on white only",
+      "generator_command": "python3 -m hushraster encode sl1+ --ppm 6 < payload.bin > image.png"
+    },
+    {
+      "file": "SL1-example-binary.png",
+      "payload_bytes": 22,
+      "payload_sha256": "62358d6e2d7086dd274c980d0bb831871cd08932d4a91168de1f0a0fb5aad6f6",
+      "png_sha256": "601ea8d20914b992cf1259c210acbadbb454fbe211fb88f8a43a879a8c26a604",
+      "width": 1590,
+      "height": 132,
+      "pixels": 209880,
+      "ppm": 6,
+      "explicit_decode": "passed",
+      "automatic_decode": "passed",
+      "visual_palette": "black bars on white only",
+      "generator_command": "python3 -m hushraster encode sl1+ --ppm 6 < payload.bin > image.png"
+    }
+  ]
+}

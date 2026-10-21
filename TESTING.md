@@ -1,20 +1,24 @@
-# Testing HushRaster
+# Testing HushRaster 1.0.1
 
-Run the fast/targeted suites from the repository root:
+Run from the repository root:
 
 ```bash
 python -m compileall -q hushraster.py hushraster tests
-python tests/test_compression_recovery.py
-python tests/test_failsafe.py
-python tests/test_encoder_features.py
-python tests/test_resize_928_regression.py
-python tests/test_cli_smoke.py
+python -m pytest -q
 ```
 
-`tests/run_tests.py` is the larger generated-image and compression/cropping matrix. It creates its files in `test-results/`; some corner-crop recovery cases are computationally expensive and may take a long time on constrained runtimes. Do not treat a timeout as a pass. In the current development environment, the focused suites above passed, while one full-matrix attempt timed out after 360 seconds during the later PNG crop boundary probes, after the lossy center-crop tests.
+Coverage includes pipe-only CLI round trips, standalone OI, reserved-format errors, legacy IMGMod helpers, distinct marker/finder signatures across the registry, all 200 additional numbered standards, varied binary payloads, Reed–Solomon correction in D2 and R1–R5, Hamming correction, all new glyph trees, CRC verification, `d1+` selector handling, and both module and direct-script launchers.
 
-The test matrix includes raw and opt-in zlib payloads, legacy format-2 decoding, SECDED fault injection, CLI text/binary round-trips, safe no-overwrite behavior, `--redo` pixel equivalence, blank canvases, and the Android runtime case where `os.link` is absent.
+The standard trees contain P1–P13, D1–D11, CE1–CE11, Z1–Z11, M1–M10, H1–H10 and T1–T10. No numbered variant is a compatibility profile. Each has a unique finder signature and either an in-band wire marker or its own standard-specific length/ECC framing and coding transform. M uses checkerboard-phase cells, H uses hexagonal-outline cells, and T uses up/down triangles. The pipe contract is intentional: normal encode/decode/inspect commands exchange data over stdin/stdout; `imgmod` is the explicit file-path exception.
 
-**Latest independent run:** compilation, `test_compression_recovery.py`, `test_failsafe.py`, `test_encoder_features.py`, and `test_cli_smoke.py` passed. `test_resize_928_regression.py` did not finish within a 300-second timeout in this run, so it is not counted as passed. Building a wheel and installing from the source ZIP both succeeded with build isolation disabled; build isolation could not fetch setuptools in this network-restricted test environment. Re-run the full suite and package build in CI before tagging a release.
+No test can guarantee survival under arbitrary resizing, cropping, camera perspective or lossy recompression. The standalone raster scanner expects an aligned grid. Error correction varies by standard, and CRC32 is not cryptographic authentication.
 
-The Python implementation and CLI are licensed under GNU GPL v3.0-only. The format specification in `FORMAT.md` is dedicated under CC0 1.0 Universal; see `LICENSE` and `LICENSES/CC0-1.0.txt` for the distinction.
+
+## Additional 200 standards and R1 logo test
+
+- 200 additional standards across the A/B/F/G/I/J/K/N/Q/R/S/U/V/W/X/Y/AA/BR/CP/ST trees.
+- Binary-safe round trips for all 200 at PPM 1 and PPM 4.
+- Unique finder templates, distinct 4×4 glyphs for all 20 additional visual trees, selector routing and auto-detection.
+- R1–R5 Reed–Solomon codewords tested at their full error-correction limits (16, 24, 12, 8, and 32 unknown symbol errors, respectively).
+- R1 single-finder geometry and centered 7×7 opaque logo-overlay recovery tested at PPM 1 and PPM 4.
+- R1 and R2 extended payload-length framing tested with lengths at and above 255 bytes.

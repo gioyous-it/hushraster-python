@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 HushRaster contributors
+# SPDX-License-Identifier: GPL-3.0-only
 """Tests for importable API, --redo semantics, blank canvas, and Android fallback."""
 from __future__ import annotations
 
 import errno
 import os
+import random
 import subprocess
 import sys
 import tempfile
@@ -61,11 +64,11 @@ def test_color_parser() -> None:
 
 
 def test_import_api_and_blank_canvas() -> None:
-    assert hushraster.__version__ == "1.0"
+    assert hushraster.__version__ == "1.0.1"
     for _name in ("encode_image", "decode_image", "encode_repeated", "create_blank_canvas"):
         assert callable(getattr(hushraster, _name))
     payload = b"a small blank-canvas payload\x00\xff"
-    for compression in ("none", "z"):
+    for compression in ("none",):
         canvas = create_blank_canvas(payload, "payload.bin", "80", compression=compression)
         assert canvas.mode == "RGB"
         assert canvas.getpixel((0, 0)) == (128, 128, 128)
@@ -78,6 +81,36 @@ def test_import_api_and_blank_canvas() -> None:
         assert tiles >= required_tiles(stored_len, "payload.bin", FORMAT_VERSION)
         min_size = minimum_canvas_size(stored_len, "payload.bin")
         assert canvas.size == min_size
+
+
+def test_standalone_barcode_survives_distributed_cutouts() -> None:
+    """Deterministic adversarial-looking damage: many separated blank patches."""
+    payload = b"HushRaster barcode crop test\x00\xff"
+    canvas = create_blank_canvas(payload, "crop-test.bin", "80")
+    barcode, _info = encode_repeated(canvas, payload, "crop-test.bin", verify=True)
+    damaged = barcode.copy()
+    draw = ImageDraw.Draw(damaged)
+    rng = random.Random(181)
+    masked = bytearray(damaged.width * damaged.height)
+
+    # Erase 80 module-aligned 64x64 patches, approximately 16% of the raster
+    # in this deterministic fixture. The scanner must still verify the digest.
+    for _ in range(80):
+        x = rng.randrange(damaged.width // 8) * 8
+        y = rng.randrange(damaged.height // 8) * 8
+        x1 = min(damaged.width, x + 64)
+        y1 = min(damaged.height, y + 64)
+        draw.rectangle((x, y, x1 - 1, y1 - 1), fill=(128, 128, 128))
+        row = b"\x01" * (x1 - x)
+        for yy in range(y, y1):
+            start = yy * damaged.width + x
+            masked[start:start + len(row)] = row
+
+    damaged_fraction = sum(masked) / len(masked)
+    assert damaged_fraction > 0.15, f"expected substantial masking, got {damaged_fraction:.2%}"
+    recovered, _header, stats = decode_image(damaged, mode="strict")
+    assert recovered == payload
+    assert stats["integrity_verified"]
 
 
 def _cover() -> Image.Image:
@@ -116,16 +149,35 @@ def test_redo_128_and_cli_blank_examples() -> None:
         binary = root / "tiny.bin"
         binary.write_bytes(bytes(range(32)))
         output = root / "blank.png"
-        result = run_cli("encode", str(binary), str(output), "--on-blank", "80", "--redo", "2")
-        assert output.exists() and "generated blank canvas" in result.stdout and "Encoder passes (--redo): 2" in result.stdout
+        encoded = subprocess.run(
+            [sys.executable, "-m", "hushraster", "encode", "p2+"], cwd=ROOT,
+            input=binary.read_bytes(), capture_output=True, timeout=120, check=False,
+        )
+        assert encoded.returncode == 0, encoded.stderr.decode(errors="replace")
+        assert encoded.stdout.startswith(b"\x89PNG\r\n\x1a\n")
+        output.write_bytes(encoded.stdout)
         recovered_path = root / "out.bin"
-        run_cli("decode", str(output), str(recovered_path))
+        decoded = subprocess.run(
+            [sys.executable, "-m", "hushraster", "decode"], cwd=ROOT,
+            input=output.read_bytes(), capture_output=True, timeout=120, check=False,
+        )
+        assert decoded.returncode == 0, decoded.stderr.decode(errors="replace")
+        recovered_path.write_bytes(decoded.stdout)
         assert recovered_path.read_bytes() == binary.read_bytes()
 
         text_output = root / "blank-text.png"
-        run_cli("encode-text", "hello cyan", str(text_output), "--on-blank", "cyan")
-        text = run_cli("decode-text", str(text_output))
-        assert text.stdout == "hello cyan\n"
+        encoded_text = subprocess.run(
+            [sys.executable, "-m", "hushraster", "encode", "p2+"], cwd=ROOT,
+            input=b"hello cyan", capture_output=True, timeout=120, check=False,
+        )
+        assert encoded_text.returncode == 0, encoded_text.stderr.decode(errors="replace")
+        text_output.write_bytes(encoded_text.stdout)
+        text = subprocess.run(
+            [sys.executable, "-m", "hushraster", "decode"], cwd=ROOT,
+            input=text_output.read_bytes(), capture_output=True, timeout=120, check=False,
+        )
+        assert text.returncode == 0, text.stderr.decode(errors="replace")
+        assert text.stdout == b"hello cyan"
 
 
 def test_android_missing_link_fallback_and_no_clobber() -> None:
@@ -148,10 +200,11 @@ def test_android_missing_link_fallback_and_no_clobber() -> None:
 def main() -> None:
     test_color_parser()
     test_import_api_and_blank_canvas()
+    test_standalone_barcode_survives_distributed_cutouts()
     test_redo_is_exactly_repeated_modulation()
     test_redo_128_and_cli_blank_examples()
     test_android_missing_link_fallback_and_no_clobber()
-    print("PASS: importable API; blank-canvas color syntax and minimum capacity; redo pixel-equivalence for 1/2/5 passes; redo=128 strict decode; CLI blank binary/text examples; Android missing-os.link fallback and no-clobber protection")
+    print("PASS: importable API; blank-canvas sizing/colors; standalone barcode strict recovery after 80 distributed cutouts masking >15% of pixels; redo equivalence and redo=128; CLI binary/text examples; Android missing-os.link fallback/no-clobber protection")
 
 
 if __name__ == "__main__":
